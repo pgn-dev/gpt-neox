@@ -335,6 +335,101 @@ def _build_shuffle_idx(size, np_rng):
     np_rng.shuffle(shuffle_idx)
     return shuffle_idx
 
+def permute_spaces(sample, np_rng, neox_args):
+    """
+    Take in a sample (np array w/ size (0,chunklength)) and perform a FIM transformation
+    on spaces in the layout *only* 
+
+    example (ignore newlines): 
+    --------------------------------
+    [prompt] a bedroom is adjacent to the kitchen 
+    [layout] bedroom1: (194,91)(135,91)(135,47)(194,47), 
+    living_room: (121,194)(47,194)(47,91)(106,91)(106,106)(121,106), 
+    bathroom1: (179,121)(135,121)(135,91)(179,91), 
+    bedroom2: (209,165)(135,165)(135,121)(209,121), 
+    bathroom2: (165,209)(135,209)(135,165)(165,165), 
+    bedroom3: (121,238)(47,238)(47,194)(121,194), 
+    kitchen: (135,77)(106,77)(106,18)(135,18), 
+    corridor: (121,209)(121,106)(106,106)(106,77)(135,77)(135,209) <|endoftext|>
+    --------------------------------
+
+    The transform will mask one or more spaces from the layout (instead of a random span) and place them
+    at the end of the prompt. The model can then be tasked with predicting the masked spaces.
+
+    --------------------------------
+    <prefix token>
+    [prompt] a bedroom is adjacent to the kitchen 
+    [layout] bedroom1: (194,91)(135,91)(135,47)(194,47), 
+    living_room: (121,194)(47,194)(47,91)(106,91)(106,106)(121,106), 
+    <suffix token>
+    bedroom2: (209,165)(135,165)(135,121)(209,121), 
+    bathroom2: (165,209)(135,209)(135,165)(165,165), 
+    bedroom3: (121,238)(47,238)(47,194)(121,194), 
+    kitchen: (135,77)(106,77)(106,18)(135,18), 
+    corridor: (121,209)(121,106)(106,106)(106,77)(135,77)(135,209) 
+    <mask token>
+    bathroom1: (179,121)(135,121)(135,91)(179,91),
+    <|endoftext|>
+    --------------------------------
+
+
+    Maintain the same sample length (if transform creates a few extra tokens, drop them).
+    """
+    fim_rate = neox_args.fim_rate
+    tokenizer = neox_args.tokenizer
+
+    suffix_tok_id, prefix_tok_id, middle_tok_id = tokenizer.vocab_size - 1, tokenizer.vocab_size, tokenizer.vocab_size + 1
+
+    if np_rng.binomial(1, fim_rate): # sample to see if we should transform this sample
+
+        contents = tokenizer.detokenize(sample)
+ 
+        # parse spaces from the layout
+        prompt, layout = contents.split("[layout]")
+        spaces = layout.split(", ")
+        spaces = [s.strip() for s in spaces]
+        try:
+            # sample a number of spaces to mask, 
+            # mask at least one, keep at least one ?
+            num_spaces = np_rng.randint(1, len(spaces)-1)
+
+            # select what contiguous spaces to mask
+            start_idx = np_rng.randint(0, len(spaces)-num_spaces)
+            end_idx = start_idx + num_spaces
+        except ValueError as e:
+            print(len(contents), contents)
+            print(e)
+            raise e
+
+        prefix = prompt + "[layout] " + ", ".join(spaces[:start_idx])
+        middle = ", ".join(spaces[start_idx:end_idx])
+        suffix = ", ".join(spaces[end_idx:]) + " "
+
+        suffix = np.array([suffix_tok_id, *tokenizer.tokenize(suffix)])
+        prefix = np.array([prefix_tok_id, *tokenizer.tokenize(prefix)])
+        middle = np.array([middle_tok_id, *tokenizer.tokenize(middle)])
+
+        new_length = suffix.shape[0] + prefix.shape[0] + middle.shape[0]
+        diff = new_length - sample.shape[0]
+
+        if diff > 0: # too long
+            if suffix.shape[0] <= diff: # return the original sample if no space to remove suffix tokens
+                return sample, np_rng
+            suffix = suffix[:suffix.shape[0] - diff] # truncate suffix tokens (is this desirable?)
+        elif diff < 0: # too short
+            suffix = np.concatenate([suffix, np.full((-1 * diff), tokenizer.pad)])
+
+        new_sample = np.concatenate([
+            prefix,
+            suffix,
+            middle,
+        ])
+    else:
+        # don't do FIM preproc
+        new_sample = sample
+
+    return new_sample, np_rng
+
 
 def permute(sample, np_rng, neox_args):
     """
