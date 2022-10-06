@@ -62,34 +62,38 @@ class FIMer(object):
             # Remove <EOD> token
             text = text.replace(eod_token, "")
 
-            # Split text into 2 parts
-            prompt, layout = text.split("[layout]")
-            spaces = layout.split(", ")
-            spaces = [s.strip() for s in spaces]
-            if len(spaces) <= 2:
-                # don't bother masking
-                return text, len(text)
-            # shuffle the spaces
-            FIMer.rng.shuffle(spaces)
+            # error handling for empty documents/lines
+            try:
+                # Split text into 2 parts
+                prompt, layout = text.split("[layout]")
+                spaces = layout.split(", ")
+                spaces = [s.strip() for s in spaces]
+                if len(spaces) <= 2:
+                    # don't bother masking
+                    return text, len(text)
+                # shuffle the spaces
+                FIMer.rng.shuffle(spaces)
 
-            # sample a number of spaces to mask, 
-            # mask at least one, keep at least one ?
-            num_spaces = FIMer.rng.integers(1, len(spaces)-1)
+                # sample a number of spaces to mask, 
+                # mask at least one, keep at least one ?
+                num_spaces = FIMer.rng.integers(1, len(spaces)-1)
 
-            # select what contiguous spaces to mask
-            # don't mask the first one
+                # select what contiguous spaces to mask
+                # don't mask the first one
 
-            start_idx = FIMer.rng.integers(1, len(spaces)-num_spaces)
-            end_idx = start_idx + num_spaces
+                start_idx = FIMer.rng.integers(1, len(spaces)-num_spaces)
+                end_idx = start_idx + num_spaces
 
-            prefix = prompt + "[layout] " + prefix_token + " " + ", ".join(spaces[:start_idx])
-            middle = middle_token + " " + ", ".join(spaces[start_idx:end_idx])
-            suffix = suffix_token + " " + ", ".join(spaces[end_idx:]) + " "
+                prefix = prompt + "[layout] " + prefix_token + " " + ", ".join(spaces[:start_idx])
+                middle = middle_token + " " + ", ".join(spaces[start_idx:end_idx])
+                suffix = suffix_token + " " + ", ".join(spaces[end_idx:]) + " "
 
-            # PSM or SPM?
-            # do PSM for now
-            text = " ".join([prefix, suffix, middle, eod_token])
-        
+                # PSM or SPM?
+                # do PSM for now
+                text = " ".join([prefix, suffix, middle, eod_token])
+            except Exception as e:
+                print(f"Error FIMing document {text}: {e}")
+
         return text, len(text)
 
 def get_args():
@@ -269,6 +273,63 @@ def main():
                 if i != 0:
                     pbar.update(args.log_interval)
 
+    sys.exit()
+    if args.workers > 1:
+        pool = multiprocessing.Pool(args.workers, initializer=encoder.initializer)
+        encoded_docs = pool.imap(encoder.encode, fin, chunksize=25)
+    else:
+        encoder.initializer()
+        encoded_docs = (encoder.encode(doc) for doc in fin)
+
+    # make a dataset builder for each key in args.jsonl_keys
+    # each key will output to a different file beginning with args.output_prefix
+    output_bin_files = {}
+    output_idx_files = {}
+    builders = {}
+    for key in args.jsonl_keys:
+        output_bin_files[key] = "{}_{}_{}.bin".format(
+            args.output_prefix, key, "document"
+        )
+        output_idx_files[key] = "{}_{}_{}.idx".format(
+            args.output_prefix, key, "document"
+        )
+        builders[key] = indexed_dataset.make_builder(
+            output_bin_files[key],
+            impl=args.dataset_impl,
+            vocab_size=tokenizer.vocab_size,
+        )
+
+    # actually do tokenization
+    proc_start = time.time()
+    total_bytes_processed = 0
+    pbar = tqdm.tqdm()
+    for i, (doc, bytes_processed) in enumerate(encoded_docs, start=1):
+        total_bytes_processed += bytes_processed
+
+        # release semaphore so `yield_from_files` can add another file to the buffer
+        semaphore.release()
+
+        # add each tokenized document / sentence
+        for key, sentences in doc.items():
+            for sentence in sentences:
+                builders[key].add_item(torch.IntTensor(sentence))
+            # separate with eos token
+            builders[key].end_document()
+
+        # log progress
+        if i % args.log_interval == 0:
+            current = time.time()
+            elapsed = current - proc_start
+            mbs = total_bytes_processed / elapsed / 1024 / 1024
+            pbar.set_description(
+                f"Processed {i}{'' if args.num_docs is None else '/' + str(args.num_docs)} documents ({i / elapsed} docs/s, {mbs} MB/s)."
+            )
+            if i != 0:
+                pbar.update(args.log_interval)
+
+    # save output file
+    for key in args.jsonl_keys:
+        builders[key].finalize(output_idx_files[key])
 
 
 if __name__ == "__main__":
