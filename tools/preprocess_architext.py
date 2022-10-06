@@ -92,8 +92,9 @@ class FIMer(object):
                 # do PSM for now
                 text = " ".join([prefix, suffix, middle, eod_token])
             except Exception as e:
-                print(f"Error FIMing document {text}: {e}")
-
+                safe_text = ' '.join('{:02X}'.format(c) for c in text)
+                print(f"Error FIMing document {safe_text}: {e}")
+                return '', 0
         return text, len(text)
 
 def get_args():
@@ -261,7 +262,8 @@ def main():
         for i, (doc, bytes_processed) in enumerate(fimed_docs, start=1):
             total_bytes_processed += bytes_processed
             semaphore.release()
-            fout.write(doc + "\n")
+            if doc:
+                fout.write(doc + "\n")
             # log progress
             if i % args.log_interval == 0:
                 current = time.time()
