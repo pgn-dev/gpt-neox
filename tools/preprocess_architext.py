@@ -92,7 +92,7 @@ class FIMer(object):
                 # do PSM for now
                 text = " ".join([prefix, suffix, middle, eod_token])
             except Exception as e:
-                safe_text = ' '.join('{:02X}'.format(c) for c in text)
+                safe_text = ' '.join('{:02X}'.format(c) for c in text.encode())
                 print(f"Error FIMing document {safe_text}: {e}")
                 return '', 0
         return text, len(text)
